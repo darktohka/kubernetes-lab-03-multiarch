@@ -1,0 +1,84 @@
+# =============================================================================
+# Example 3 - pastebin-csharp-qemu  (QEMU multi-arch on one runner)
+# =============================================================================
+#
+# Build BOTH linux/amd64 and linux/arm64 from the examples/csharp-aspnet source
+# on a SINGLE x64 runner by registering QEMU binfmt handlers with Buildx. The
+# ARM64 half is emulated on x86_64, so there is no second machine and no
+# manifest-merge step - Buildx emits the manifest list directly.
+#
+# This is the "one machine, all platforms" approach:
+#
+#   +-------------------------------------------+
+#   | ubuntu-26.04 (x86_64)                     |
+#   |                                           |
+#   |  setup-qemu  -> binfmt_misc arm64         |
+#   |  setup-buildx -> docker-container driver  |
+#   |  buildx build --platform linux/amd64,linux/arm64 |
+#   |       amd64: native                       |
+#   |       arm64: emulated through QEMU        |
+#   |  -> :csharp-multiarch-qemu (manifest list)|
+#   +-------------------------------------------+
+#
+# Trade-off vs. Example 2: much simpler workflow, but the ARM64 build is
+# emulated and can be an order of magnitude slower.
+#
+# Published image:  <DOCKER_IMAGE>:csharp-multiarch-qemu  (amd64 + arm64)
+#
+# Requires:
+#   - repository variable DOCKER_IMAGE    (e.g. "darktohka/multiarch-lab")
+#   - repository secret   DOCKERHUB_TOKEN (Docker Hub PAT, Read & Write)
+# =============================================================================
+
+name: pastebin-csharp-qemu
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOCKER_IMAGE: ${{ vars.DOCKER_IMAGE || 'your-dockerhub-username/multiarch-lab' }}
+  TAG: csharp-multiarch-qemu
+
+jobs:
+  build:
+    name: Build linux/amd64 + linux/arm64 with QEMU
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Derive the Docker Hub username from DOCKER_IMAGE
+        id: dockerhub
+        run: echo "username=${DOCKER_IMAGE%%/*}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU (register arm64 binfmt handlers)
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ steps.dockerhub.outputs.username }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # A single build produces a multi-arch manifest list and pushes it.
+      - name: Build and push the multi-arch image
+        uses: docker/build-push-action@v7
+        with:
+          context: examples/csharp-aspnet
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ env.DOCKER_IMAGE }}:${{ env.TAG }}
+
+      - name: Inspect the published manifest
+        run: docker buildx imagetools inspect "${{ env.DOCKER_IMAGE }}:${{ env.TAG }}"

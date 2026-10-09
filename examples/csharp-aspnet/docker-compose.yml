@@ -1,0 +1,19 @@
+# Local development convenience. Compose always builds for the architecture of
+# the machine you run it on - use `docker buildx` (see the root README) when you
+# want to produce or test a multi-architecture image.
+services:
+  pastebin:
+    build: .
+    # Override DOCKER_IMAGE to match the value used by the GitHub Actions
+    # workflows, e.g. DOCKER_IMAGE=darktohka/multiarch-lab.
+    image: ${DOCKER_IMAGE:-your-dockerhub-username/multiarch-lab}:csharp-multiarch-native
+    container_name: pastebin-csharp-multiarch
+    ports:
+      - "8201:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 20s
+      retries: 5

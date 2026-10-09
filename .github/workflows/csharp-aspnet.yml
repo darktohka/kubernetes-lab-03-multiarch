@@ -1,0 +1,147 @@
+# =============================================================================
+# Example 2 - csharp-aspnet  (native multi-arch)
+# =============================================================================
+#
+# Build the SAME csharp-aspnet source for BOTH linux/amd64 and linux/arm64,
+# each on its own NATIVE runner, then combine the two per-architecture images
+# into one multi-arch manifest list in a separate job.
+#
+# This is the "build each architecture on real hardware" approach:
+#
+#   +--------------------+        +--------------------+
+#   | ubuntu-26.04       |        | ubuntu-26.04-arm   |
+#   | build linux/amd64  |        | build linux/arm64  |
+#   | push by digest --> |        | push by digest --> |
+#   +--------------------+        +--------------------+
+#              \                          /
+#               \   digests (artifacts)  /
+#                v                      v
+#           +----------------------------------+
+#           | ubuntu-26.04  (merge job)        |
+#           | docker buildx imagetools create  |
+#           | -> :csharp-multiarch-native      |
+#           +----------------------------------+
+#
+# Neither runner needs emulation, so both halves build at full speed.
+#
+# Published image:  <DOCKER_IMAGE>:csharp-multiarch-native  (amd64 + arm64)
+#
+# Requires:
+#   - repository variable DOCKER_IMAGE    (e.g. "darktohka/multiarch-lab")
+#   - repository secret   DOCKERHUB_TOKEN (Docker Hub PAT, Read & Write)
+# =============================================================================
+
+name: csharp-aspnet
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOCKER_IMAGE: ${{ vars.DOCKER_IMAGE || 'your-dockerhub-username/multiarch-lab' }}
+  TAG: csharp-multiarch-native
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Stage 1: build one architecture per runner and push it BY DIGEST.
+  # Nothing is tagged yet - each job publishes an untagged image manifest and
+  # records its immutable sha256 digest as an artifact.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.platform }} natively
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-26.04
+            artifact: digest-amd64
+          - platform: linux/arm64
+            runner: ubuntu-26.04-arm
+            artifact: digest-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Derive the Docker Hub username from DOCKER_IMAGE
+        id: dockerhub
+        run: echo "username=${DOCKER_IMAGE%%/*}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ steps.dockerhub.outputs.username }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: examples/csharp-aspnet
+          platforms: ${{ matrix.platform }}
+          # name MUST stay untagged when using push-by-digest.
+          outputs: type=image,name=${{ env.DOCKER_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          # Attestations add non-image entries to the index, which the merge
+          # step cannot combine; keep each per-architecture manifest clean.
+          provenance: false
+          sbom: false
+
+      - name: Export the digest to a file
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload the digest as an artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Stage 2: collect every digest and stitch them into one manifest list,
+  # then tag and push the resulting multi-arch image.
+  # ---------------------------------------------------------------------------
+  merge:
+    name: Combine digests into one multi-arch manifest
+    runs-on: ubuntu-26.04
+    needs: build
+    steps:
+      - name: Download all digests
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Derive the Docker Hub username from DOCKER_IMAGE
+        id: dockerhub
+        run: echo "username=${DOCKER_IMAGE%%/*}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ steps.dockerhub.outputs.username }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create the manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            --tag "${{ env.DOCKER_IMAGE }}:${{ env.TAG }}" \
+            $(printf '${{ env.DOCKER_IMAGE }}@sha256:%s ' *)
+
+      - name: Inspect the published manifest
+        run: docker buildx imagetools inspect "${{ env.DOCKER_IMAGE }}:${{ env.TAG }}"

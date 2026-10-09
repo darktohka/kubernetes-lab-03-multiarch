@@ -1,0 +1,23 @@
+# Local development convenience. Compose always builds for the architecture of
+# the machine you run it on - use `docker buildx` (see the root README) when you
+# want to produce or test a multi-architecture image.
+services:
+  pastebin:
+    build: .
+    # Override DOCKER_IMAGE to match the value used by the GitHub Actions
+    # workflows, e.g. DOCKER_IMAGE=darktohka/multiarch-lab.
+    image: ${DOCKER_IMAGE:-your-dockerhub-username/multiarch-lab}:python-arm64
+    container_name: pastebin-python-multiarch
+    ports:
+      - "8001:8080"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2).status==200 else sys.exit(1)"
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
